@@ -1,12 +1,17 @@
-﻿using Newtonsoft.Json.Linq;
+﻿using System.Text.RegularExpressions;
+using Newtonsoft.Json.Linq;
+using Microsoft.Extensions.Configuration;
 
 class Program
 {
     private static readonly string GitHubApiUrl = "https://api.github.com/repos/lodash/lodash/contents";
-    private static readonly string GitHubToken = "<GITHUB_TOKEN>"; // Replace with GitHub token
+    private static readonly string GitHubToken = GetGitHubToken();
 
     static async Task Main(string[] args)
     {
+        Console.InputEncoding = System.Text.Encoding.UTF8;
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
+
         try
         {
             var filePaths = await GetAllFilePaths();
@@ -38,26 +43,37 @@ class Program
     {
         using var httpClient = CreateHttpClient();
         var url = currentUrl ?? GitHubApiUrl;
-        var response = await httpClient.GetStringAsync(url);
-        var items = JArray.Parse(response);
-
         var filePaths = new List<string>();
+        var nextUrl = url;
 
-        foreach (var item in items)
+        do
         {
-            var path = item["path"]?.ToString();
-            var type = item["type"]?.ToString();
+            var response = await httpClient.GetAsync(nextUrl);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Failed to fetch data: {response.StatusCode}");
+            }
 
-            if (type == "file" && (path.EndsWith(".js") || path.EndsWith(".ts")))
+            var items = JArray.Parse(await response.Content.ReadAsStringAsync());
+
+            foreach (var item in items)
             {
-                filePaths.Add(path);
+                var path = item["path"]?.ToString();
+                var type = item["type"]?.ToString();
+
+                if (type == "file" && (path.EndsWith(".js") || path.EndsWith(".ts")))
+                {
+                    filePaths.Add(path);
+                }
+                else if (type == "dir")
+                {
+                    var subDirFiles = await GetAllFilePaths(item["url"]?.ToString());
+                    filePaths.AddRange(subDirFiles);
+                }
             }
-            else if (type == "dir")
-            {
-                var subDirFiles = await GetAllFilePaths(item["url"]?.ToString());
-                filePaths.AddRange(subDirFiles);
-            }
-        }
+
+            nextUrl = response.Headers.Contains("Link") ? GetNextPageLink(response.Headers.GetValues("Link").FirstOrDefault()) : null;
+        } while (!string.IsNullOrEmpty(nextUrl));
 
         return filePaths;
     }
@@ -97,5 +113,29 @@ class Program
             httpClient.DefaultRequestHeaders.Add("Authorization", $"token {GitHubToken}");
         }
         return httpClient;
+    }
+
+    private static string GetNextPageLink(string linkHeader)
+    {
+        if (string.IsNullOrEmpty(linkHeader)) return null;
+
+        var links = linkHeader.Split(',');
+        foreach (var link in links)
+        {
+            var match = Regex.Match(link, "<(.*?)>; rel=\"next\"");
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+        }
+        return null;
+    }
+
+    private static string GetGitHubToken()
+    {
+        var config = new ConfigurationBuilder()
+            .AddUserSecrets<Program>()
+            .Build();
+        return config["GitHubToken"];
     }
 }
